@@ -6,28 +6,55 @@ from docx.oxml import OxmlElement
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 import io
 import re
+import pandas as pd
 
-# --- 全角/半角 変換用テーブル ---
-HALF2FULL = str.maketrans(
-    '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
-    '０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ'
-)
-FULL2HALF = str.maketrans(
-    '０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ',
-    '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-)
-BORDER_CHARS = ['┌', '└', '│', '─', '├', '┤', '┬', '┴', '┼']
+# ==========================================================
+# --- 全角/半角 変換用テーブル（英数字＋すべての記号を網羅） ---
+# ==========================================================
+HALF_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~¥"
+FULL_CHARS = "０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ！＂＃＄％＆’（）＊＋，－．／：；＜＝＞？＠［＼］＾＿｀｛｜｝～￥"
+
+HALF2FULL = str.maketrans(HALF_CHARS, FULL_CHARS)
+FULL2HALF = str.maketrans(FULL_CHARS, HALF_CHARS)
+
+BORDER_CHARS = ['┌', '└', '│', '─', '├', '┤', '┬', '┴', '┼', '━', '┃', '┏', '┓', '┗', '┛', '┣', '┫', '┳', '┻', '╋', '┠', '┨', '┯', '┷', '┿', '┝', '┥', '┰', '┸', '╂']
+
+# --- 階層ごとの正規表現パターン ---
+RE_SHOU = r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+章'
+RE_JOU  = r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+条'
+RE_KOU  = r'^[０-９0-9]+[．\.]'
+RE_GOU  = r'^[①-⑳㉑-㉟㊱-㊿]'
+RE_LV5  = r'^[（\(][０-９0-9]+[）\)]'
+RE_LV6  = r'^[（\(][ア-ンァ-ォ]+[）\)]'
 
 def convert_char_width(text, mode):
-    if mode == "半角に統一（推奨）":
+    if mode == "半角に統一":
         return text.translate(FULL2HALF)
-    elif mode == "全角に統一":
+    elif mode == "全角に統一（推奨）":
         return text.translate(HALF2FULL)
     return text
 
-def set_font(run, font_name, east_asia_font_name, size_pt=None, bold=False):
+def get_hierarchy_match(line, regex_pat, custom_markers_str, width_mode):
+    m = re.match(regex_pat, line)
+    if m:
+        return m.group(0)
+    if custom_markers_str:
+        converted_custom = convert_char_width(custom_markers_str, width_mode)
+        markers = [m.strip() for m in converted_custom.split(',') if m.strip()]
+        for marker in markers:
+            if line.startswith(marker):
+                return marker
+    return None
+
+def strip_marker(text, marker_str):
+    if not marker_str: return text
+    if text.startswith(marker_str):
+        return text[len(marker_str):].lstrip()
+    return text
+
+def set_font(run, font_name, size_pt=None, bold=False):
     run.font.name = font_name
-    run._element.rPr.rFonts.set(qn('w:eastAsia'), east_asia_font_name)
+    run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
     run.font.color.rgb = RGBColor(0, 0, 0)
     if size_pt:
         run.font.size = Pt(size_pt)
@@ -36,11 +63,13 @@ def set_font(run, font_name, east_asia_font_name, size_pt=None, bold=False):
 
 def add_toc(doc):
     paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.snap_to_grid = False
     run = paragraph.add_run("目　次")
-    set_font(run, 'Arial', 'MS ゴシック', size_pt=14, bold=True)
+    set_font(run, 'MS ゴシック', size_pt=14, bold=True)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     p = doc.add_paragraph()
+    p.paragraph_format.snap_to_grid = False
     run = p.add_run()
     fldChar = OxmlElement('w:fldChar')
     fldChar.set(qn('w:fldCharType'), 'begin')
@@ -71,16 +100,41 @@ def is_csv_block(lines):
         return False
     return any(',' in line for line in lines if line.strip())
 
-def create_word_doc(text, selected_font, width_mode, add_body_space, indent_normal, art_indent_val, indent_kou, hanging_kou, indent_gou, hanging_gou):
-    doc = docx.Document()
-    set_update_fields(doc)
+def apply_format_sync(p, font_name, size_pt=10.5, bold=False, base_ind=0.0, hanging_ind=0.0, align_center=False):
+    pf = p.paragraph_format
+    pf.snap_to_grid = False
+    
+    total_left = base_ind + hanging_ind
+    pf.left_indent = Pt(10.5 * total_left)
+    
+    if hanging_ind != 0:
+        pf.first_line_indent = Pt(-10.5 * hanging_ind)
+    else:
+        pf.first_line_indent = Pt(0)
+    
+    pf.space_after = Pt(0)
+    pf.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    
+    if align_center:
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    else:
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    
+    if not p.runs:
+        return
+    for run in p.runs:
+        set_font(run, font_name, size_pt, bold)
+
+def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_jou, add_space_kou, add_space_gou, add_space_lv5, add_space_lv6, indent_body_shou, indent_body_jou, indent_body_kou, indent_body_gou, indent_body_lv5, indent_body_lv6, art_indent_val, indent_kou, hanging_kou, indent_gou, hanging_gou, indent_lv5, hanging_lv5, indent_lv6, hanging_lv6, custom_kou, custom_gou, custom_lv5, custom_lv6, out_mode):
+    doc = docx.Document('template.docx')
+    if "アウトライン" in out_mode:
+        set_update_fields(doc)
     
     style = doc.styles['Normal']
     font = style.font
-    font.name = 'Arial'
+    font.name = selected_font
     font.size = Pt(10.5)
     style._element.rPr.rFonts.set(qn('w:eastAsia'), selected_font)
-    style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
     style.paragraph_format.space_after = Pt(0)
 
     toc_added = False
@@ -89,19 +143,17 @@ def create_word_doc(text, selected_font, width_mode, add_body_space, indent_norm
     block_buffer = []
     in_code_block = False
     in_csv_table = False
+    is_first_text_line = True 
+    last_ctx = "none"
     
     def flush_art(lines_to_flush):
         if not lines_to_flush: return
-        
-        # 【大復活】四角囲み（枠付きテーブル）の中に格納し、文字の折り返しを防ぐ
         table = doc.add_table(rows=1, cols=1)
         table.style = 'Table Grid'
-        
-        # 表（四角い箱）そのものを指定された幅だけ字下げする
         tbl_pr = table._element.xpath('w:tblPr')
         if tbl_pr:
             tbl_ind = OxmlElement('w:tblInd')
-            indent_twips = int(10.5 * art_indent_val * 20) # 1em = 10.5pt = 210 twips
+            indent_twips = int(10.5 * art_indent_val * 20) 
             tbl_ind.set(qn('w:w'), str(indent_twips))
             tbl_ind.set(qn('w:type'), 'dxa')
             tbl_pr[0].append(tbl_ind)
@@ -114,19 +166,16 @@ def create_word_doc(text, selected_font, width_mode, add_body_space, indent_norm
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(0)
         p.paragraph_format.snap_to_grid = False
-        p.paragraph_format.left_indent = Pt(0) # 箱の中身は字下げしない（箱ごと動いているため）
+        p.paragraph_format.left_indent = Pt(0) 
         
         for i, line in enumerate(lines_to_flush):
             if i > 0: p.add_run('\n')
-            # 【ご要望反映】図表内のテキストも全角/半角の変換対象にする
-            converted_line = convert_char_width(line, width_mode)
+            # アート内の文字も同様に指定モードで変換
+            converted_line = convert_char_width(line, "全角に統一（推奨）")
             run = p.add_run(converted_line)
-            # 空白が無視されないようにXMLレベルで保護
             for t in run._element.findall('.//w:t', namespaces=run._element.nsmap):
                 t.set(qn('xml:space'), 'preserve')
-            # 箱からはみ出さないようフォントを8.5ptに設定
-            set_font(run, 'MS Gothic', 'ＭＳ ゴシック', size_pt=8.5)
-            
+            set_font(run, 'ＭＳ ゴシック', size_pt=8.5)
         lines_to_flush.clear()
 
     def flush_csv(lines_to_flush):
@@ -140,9 +189,10 @@ def create_word_doc(text, selected_font, width_mode, add_body_space, indent_norm
         if max_cols <= 1:
             for row in valid_lines:
                 p = doc.add_paragraph()
-                p.paragraph_format.left_indent = Pt(10.5 * indent_normal)
+                p.paragraph_format.snap_to_grid = False
+                p.paragraph_format.left_indent = Pt(10.5 * indent_body_jou)
                 run = p.add_run(convert_char_width(row.strip(), width_mode))
-                set_font(run, 'Arial', selected_font, size_pt=10.5)
+                set_font(run, selected_font, size_pt=10.5)
             lines_to_flush.clear()
             return
 
@@ -157,9 +207,11 @@ def create_word_doc(text, selected_font, width_mode, add_body_space, indent_norm
                     cell.text = cell_data.strip()
                     for p in cell.paragraphs:
                         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        p.paragraph_format.snap_to_grid = False
                         for run in p.runs:
+                            # セル内のテキストを指定モードで変換
                             run.text = convert_char_width(run.text, width_mode)
-                            set_font(run, 'Arial', selected_font, size_pt=9)
+                            set_font(run, selected_font, size_pt=9)
         lines_to_flush.clear()
 
     def flush_code_block():
@@ -173,10 +225,9 @@ def create_word_doc(text, selected_font, width_mode, add_body_space, indent_norm
         raw_line = line.rstrip('\r\n')
         raw_line = re.sub(r'\[ \t]?', '', raw_line)
         raw_line = re.sub(r'\[\d+\][ \t]?', '', raw_line)
-        
         line_strip = raw_line.strip()
         
-        is_heading = bool(re.match(r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+[章条]', line_strip)) or line_strip in ["就　業　規　則", "就業規則", "賃　金　規　程", "賃金規程"]
+        is_heading = bool(re.match(r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+[章条]', line_strip)) or line_strip in ["就　業　規　則", "就業規則", "賃　金　規　程", "賃金規程", "育児・介護休業規程", "退職金規程"]
         
         if '```' in line_strip or '｀｀｀' in line_strip:
             if in_code_block:
@@ -192,7 +243,6 @@ def create_word_doc(text, selected_font, width_mode, add_body_space, indent_norm
             if is_heading:
                 flush_code_block()
                 in_code_block = False
-                pass 
             else:
                 if "The following table:" in line_strip: continue
                 if line_strip.lower() in ['text', 'csv', 'markdown']: continue
@@ -224,69 +274,118 @@ def create_word_doc(text, selected_font, width_mode, add_body_space, indent_norm
             if art_buffer: flush_art(art_buffer)
 
         line_strip = convert_char_width(line_strip, width_mode)
+        
+        m_shou = get_hierarchy_match(line_strip, RE_SHOU, None, width_mode)
+        m_jou = get_hierarchy_match(line_strip, RE_JOU, None, width_mode)
+        m_kou = get_hierarchy_match(line_strip, RE_KOU, custom_kou, width_mode)
+        m_gou = get_hierarchy_match(line_strip, RE_GOU, custom_gou, width_mode)
+        m_lv5 = get_hierarchy_match(line_strip, RE_LV5, custom_lv5, width_mode)
+        m_lv6 = get_hierarchy_match(line_strip, RE_LV6, custom_lv6, width_mode)
 
-        if line_strip in ["就　業　規　則", "就業規則", "賃　金　規　程", "賃金規程", "育児・介護休業規程", "退職金規程"]:
+        is_title = False
+        if is_first_text_line:
+            if not m_shou and not m_jou:
+                is_title = True
+            is_first_text_line = False
+        elif line_strip in ["就　業　規　則", "就業規則", "賃　金　規　程", "賃金規程", "育児・介護休業規程", "退職金規程"]:
+            is_title = True
+
+        if (is_title or m_shou or m_jou) and not toc_added:
+            add_toc(doc)
+            toc_added = True
+
+        if is_title:
             p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_after = Pt(24)
             run = p.add_run(line_strip)
-            set_font(run, 'Arial', 'MS ゴシック', size_pt=16, bold=True)
-            if not toc_added:
-                add_toc(doc)
-                toc_added = True
+            apply_format_sync(p, selected_font, size_pt=13.5, bold=True, align_center=True)
+            p.paragraph_format.space_after = Pt(24)
+            last_ctx = "shou"
 
-        elif re.match(r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+章', line_strip):
-            if not toc_added:
-                add_toc(doc)
-                toc_added = True
-            p = doc.add_paragraph(style='Heading 1')
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        elif m_shou:
+            out_txt = strip_marker(line_strip, m_shou) if "アウトライン" in out_mode else line_strip
+            p = doc.add_paragraph(out_txt, style='Heading 1' if "アウトライン" in out_mode else None)
+            apply_format_sync(p, selected_font, size_pt=13, bold=True, align_center=True)
             p.paragraph_format.space_before = Pt(18)
             p.paragraph_format.space_after = Pt(12)
-            run = p.add_run(line_strip)
-            set_font(run, 'Arial', 'MS ゴシック', size_pt=13, bold=True)
+            last_ctx = "shou"
             
-        elif re.match(r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+条', line_strip):
-            if not toc_added:
-                add_toc(doc)
-                toc_added = True
-            p = doc.add_paragraph(style='Heading 2')
+        elif m_jou:
+            out_txt = strip_marker(line_strip, m_jou) if "アウトライン" in out_mode else line_strip
+            p = doc.add_paragraph(out_txt, style='Heading 2' if "アウトライン" in out_mode else None)
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=True, base_ind=0.0)
             p.paragraph_format.space_before = Pt(6)
-            run = p.add_run(line_strip)
-            set_font(run, 'Arial', 'MS ゴシック', size_pt=10.5, bold=True)
+            
+            pPr = p._element.get_or_add_pPr()
+            pBdr = OxmlElement('w:pBdr')
+            left = OxmlElement('w:left')
+            left.set(qn('w:val'), 'single')
+            left.set(qn('w:sz'), '24') 
+            left.set(qn('w:space'), '4') 
+            left.set(qn('w:color'), '333333')
+            pBdr.append(left)
+            pPr.append(pBdr)
+            
+            last_ctx = "jou"
         
-        elif re.match(r'^([０-９0-9]+[．\.]|\([０-９0-9]+\))', line_strip):
-            p = doc.add_paragraph()
-            p.paragraph_format.left_indent = Pt(10.5 * (indent_kou + hanging_kou))
-            p.paragraph_format.first_line_indent = Pt(-10.5 * hanging_kou)
-            run = p.add_run(line_strip)
-            set_font(run, 'Arial', selected_font, size_pt=10.5)
+        elif m_kou:
+            out_txt = strip_marker(line_strip, m_kou) if "アウトライン" in out_mode else line_strip
+            p = doc.add_paragraph(out_txt, style='Heading 3' if "アウトライン" in out_mode else None)
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=indent_kou, hanging_ind=hanging_kou)
+            last_ctx = "kou"
 
-        elif re.match(r'^[①-⑳]', line_strip):
-            p = doc.add_paragraph()
-            p.paragraph_format.left_indent = Pt(10.5 * (indent_gou + hanging_gou))
-            p.paragraph_format.first_line_indent = Pt(-10.5 * hanging_gou)
-            run = p.add_run(line_strip)
-            set_font(run, 'Arial', selected_font, size_pt=10.5)
+        elif m_gou:
+            out_txt = strip_marker(line_strip, m_gou) if "アウトライン" in out_mode else line_strip
+            p = doc.add_paragraph(out_txt, style='Heading 4' if "アウトライン" in out_mode else None)
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=indent_gou, hanging_ind=hanging_gou)
+            last_ctx = "gou"
+
+        elif m_lv5:
+            out_txt = strip_marker(line_strip, m_lv5) if "アウトライン" in out_mode else line_strip
+            p = doc.add_paragraph(out_txt, style='Heading 5' if "アウトライン" in out_mode else None)
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=indent_lv5, hanging_ind=hanging_lv5)
+            last_ctx = "lv5"
+
+        elif m_lv6:
+            out_txt = strip_marker(line_strip, m_lv6) if "アウトライン" in out_mode else line_strip
+            p = doc.add_paragraph(out_txt, style='Heading 6' if "アウトライン" in out_mode else None)
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=indent_lv6, hanging_ind=hanging_lv6)
+            last_ctx = "lv6"
 
         else:
             p = doc.add_paragraph()
-            p.paragraph_format.left_indent = Pt(10.5 * indent_normal)
+            
+            add_space = False
+            if last_ctx in ["shou", "title", "none"]:
+                ind = indent_body_shou
+                add_space = add_space_shou
+            elif last_ctx == "jou":
+                ind = indent_body_jou
+                add_space = add_space_jou
+            elif last_ctx == "kou":
+                ind = indent_body_kou
+                add_space = add_space_kou
+            elif last_ctx == "gou":
+                ind = indent_body_gou
+                add_space = add_space_gou
+            elif last_ctx == "lv5":
+                ind = indent_body_lv5
+                add_space = add_space_lv5
+            elif last_ctx == "lv6":
+                ind = indent_body_lv6
+                add_space = add_space_lv6
             
             output_text = line_strip
-            if add_body_space and output_text:
+            if add_space and output_text:
                 output_text = '　' + output_text
-                
             run = p.add_run(output_text)
-            set_font(run, 'Arial', selected_font, size_pt=10.5)
+            
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=ind, hanging_ind=0.0)
             
     if block_buffer: flush_code_block()
     if art_buffer: flush_art(art_buffer)
     if csv_buffer: flush_csv(csv_buffer)
         
-    if not toc_added:
-        add_toc(doc)
-        
+    if not toc_added: add_toc(doc)
     return doc
 
 def get_html_table(csv_lines, width_mode):
@@ -310,50 +409,152 @@ def get_html_art(art_lines, indent_art, width_mode):
     converted_lines = [convert_char_width(line, width_mode) for line in art_lines]
     html = f"<div style='background-color: #fff3cd; color: #856404; padding: 4px 8px; font-size: 11px; margin-top: 10px; border-radius: 3px; margin-left: {indent_art}em; width: fit-content;'>"
     html += "⚠️ 本ツールでは可能な限り自動整形を行っておりますが、出力後はユーザー側で適宜微調整をお願いいたします。</div>"
-    # 【変更】プレビューでも「四角囲み（枠線）」が見えるようにCSSを設定
     html += f"<pre style='border: 1px solid #999; background-color: #fff; padding: 10px; font-family: \"MS Gothic\", \"ＭＳ ゴシック\", monospace; font-size: 13px; line-height: 1.2; margin: 0 0 10px; margin-left: {indent_art}em; white-space: pre; overflow-x: auto;'>{chr(10).join(converted_lines)}</pre>"
     return html
 
-# --- スクショに基づいた完全な初期値設定 ---
 def reset_settings():
-    st.session_state.font_choice = "Arial"
-    st.session_state.width_mode_choice = "半角に統一（推奨）"
-    st.session_state.add_body_space_choice = False  # スクショ通りOFF
-    st.session_state.in_normal = 2.5                # 番号なし本文：2.50
-    st.session_state.ik = 1.0                       # 項の字下げ：1.00
-    st.session_state.hk = 1.5                       # 項の突き出し：1.50
-    st.session_state.ig = 2.5                       # 号の字下げ：2.50
-    st.session_state.hg = 1.0                       # 号の突き出し：1.00
+    st.session_state.font_choice = "MS 明朝"
+    st.session_state.width_mode_choice = "全角に統一（推奨）"
+    
+    # --- スペース個別設定の初期化 ---
+    st.session_state.add_space_shou = False
+    st.session_state.add_space_jou = False
+    st.session_state.add_space_kou = False
+    st.session_state.add_space_gou = False
+    st.session_state.add_space_lv5 = False
+    st.session_state.add_space_lv6 = False
+    
+    # --- 本文インデントの初期値 ---
+    st.session_state.in_body_shou = 0.0
+    st.session_state.in_body_jou = 2.0
+    st.session_state.in_body_kou = 4.1
+    st.session_state.in_body_gou = 5.1
+    st.session_state.in_body_lv5 = 7.1
+    st.session_state.in_body_lv6 = 9.1
+    
+    # --- 階層の初期値 ---
+    st.session_state.ik = 2.8                       
+    st.session_state.hk = 1.3                       
+    st.session_state.ig = 4.1                       
+    st.session_state.hg = 1.0                       
+    st.session_state.i5 = 4.1                       
+    st.session_state.h5 = 3.0                       
+    st.session_state.i6 = 6.1                       
+    st.session_state.h6 = 3.0                       
+    
     st.session_state.art_type = "本文（番号なし）の開始位置に合わせる"
+    st.session_state.c_kou = ""
+    st.session_state.c_gou = ""
+    st.session_state.c_lv5 = ""
+    st.session_state.c_lv6 = ""
+
+# ==========================================================
+# 🔒 顧問先 個別ログイン管理システム
+# ==========================================================
+CLIENT_CREDENTIALS = {
+    "a_company": {"name": "株式会社A 様", "password": "passA"},
+    "b_company": {"name": "株式会社B 様", "password": "passB"},
+    # "c_company": {"name": "【解約済】株式会社C 様", "password": "passC"}, # ← このように # を付けるだけで遮断
+    "test_user": {"name": "テストユーザー 様", "password": "1234"},
+}
+
+def login_screen():
+    if "logged_in_client" not in st.session_state:
+        st.session_state["logged_in_client"] = None
+
+    if not st.session_state["logged_in_client"]:
+        st.markdown("## 🔒 顧問先様専用 規程作成ツール")
+        st.info("陶守社会保険労務士事務所から発行されたログインIDとパスワードを入力してください。")
+        
+        with st.form("login_form"):
+            client_id = st.text_input("ログインID")
+            client_pwd = st.text_input("パスワード", type="password")
+            submitted = st.form_submit_button("ログイン")
+            
+            if submitted:
+                if client_id in CLIENT_CREDENTIALS and CLIENT_CREDENTIALS[client_id]["password"] == client_pwd:
+                    st.session_state["logged_in_client"] = CLIENT_CREDENTIALS[client_id]["name"]
+                    st.rerun()
+                else:
+                    st.error("⚠️ IDまたはパスワードが間違っています。")
+        return False
+    return True
 
 def main():
     st.set_page_config(page_title="就業規則 Word変換", layout="wide")
+    
+    # ▼ 全体公開（リードマグネット）として運用する場合は、以下の2行を # でコメントアウトしてください ▼
+    if not login_screen():
+        return
+    st.sidebar.success(f"👤 ログイン中: **{st.session_state['logged_in_client']}**")
+    # ▲ 全体公開する場合はここまでコメントアウト ▲
+
     st.title("📄 就業規則プロフェッショナル整形ツール")
     
     if "initialized" not in st.session_state:
         reset_settings()
         st.session_state.initialized = True
 
-    st.sidebar.header("⚙️ 書式・インデント設定")
-    
+    st.sidebar.header("🚀 出力エンジン・書式設定")
+    out_mode = st.sidebar.radio("モード選択", ["【推奨】アウトライン連動", "直接モード"])
+    if "アウトライン" in out_mode:
+        df_outline = pd.DataFrame({"Lv": ["1", "2", "3", "4", "5", "6"], "役割": ["章", "条", "項", "号", "(1)", "(ア)"], "スタイル": ["見出し1", "見出し2", "見出し3", "見出し4", "見出し5", "見出し6"]})
+        st.sidebar.table(df_outline)
+
     st.sidebar.button("🔄 推奨設定（初期値）に戻す", on_click=reset_settings, use_container_width=True)
     st.sidebar.markdown("---")
 
     selected_font = st.sidebar.selectbox("基本フォント", options=["MS 明朝", "MS ゴシック", "Meiryo", "Yu Mincho", "Yu Gothic", "Arial"], key="font_choice")
-    width_mode = st.sidebar.radio("英数字の表記統一", options=["半角に統一（推奨）", "全角に統一", "変換しない（元のまま）"], key="width_mode_choice")
+    width_mode = st.sidebar.radio("英数字の表記統一", options=["全角に統一（推奨）", "半角に統一", "変換しない（元のまま）"], key="width_mode_choice")
+    
+    # ==========================================
+    # UIの究極改修: 階層ごとの完全ブロック化
+    # ==========================================
+    st.sidebar.markdown("---")
+    st.sidebar.write("**【第1階層】章（表題）の設定**")
+    add_space_shou = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_shou")
+    indent_body_shou = st.sidebar.slider("章 直後の本文 字下げ", min_value=0.0, max_value=10.0, step=0.1, key="in_body_shou")
     
     st.sidebar.markdown("---")
-    st.sidebar.write("**本文（番号なし）の設定**")
-    add_body_space = st.sidebar.checkbox("本文の先頭に全角スペース(字下げ)を自動挿入", key="add_body_space_choice")
-    indent_normal = st.sidebar.slider("「番号なし本文」の全体字下げ", min_value=0.0, max_value=5.0, step=0.5, key="in_normal")
-    
+    st.sidebar.write("**【第2階層】条の設定**")
+    add_space_jou = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_jou")
+    indent_body_jou = st.sidebar.slider("条 直後の本文 字下げ", min_value=0.0, max_value=10.0, step=0.1, key="in_body_jou")
+
     st.sidebar.markdown("---")
-    st.sidebar.write("**項・号の設定**")
-    indent_kou = st.sidebar.slider("項（１．等）の字下げ位置", min_value=0.0, max_value=5.0, step=0.5, key="ik")
-    hanging_kou = st.sidebar.slider("項の突き出し幅（ぶら下げ）", min_value=0.0, max_value=5.0, step=0.5, key="hk")
-    
-    indent_gou = st.sidebar.slider("号（① 等）の字下げ位置", min_value=0.0, max_value=5.0, step=0.5, key="ig")
-    hanging_gou = st.sidebar.slider("号の突き出し幅（ぶら下げ）", min_value=0.0, max_value=5.0, step=0.5, key="hg")
+    st.sidebar.write("**【第3階層】項（1. 等）の設定**")
+    indent_kou = st.sidebar.slider("項 の字下げ", min_value=0.0, max_value=15.0, step=0.1, key="ik")
+    hanging_kou = st.sidebar.slider("項 の突き出し幅", min_value=0.0, max_value=5.0, step=0.1, key="hk")
+    add_space_kou = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_kou")
+    indent_body_kou = st.sidebar.slider("項 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.1, key="in_body_kou")
+
+    st.sidebar.markdown("---")
+    st.sidebar.write("**【第4階層】号（① 等）の設定**")
+    indent_gou = st.sidebar.slider("号 の字下げ", min_value=0.0, max_value=15.0, step=0.1, key="ig")
+    hanging_gou = st.sidebar.slider("号 の突き出し幅", min_value=0.0, max_value=5.0, step=0.1, key="hg")
+    add_space_gou = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_gou")
+    indent_body_gou = st.sidebar.slider("号 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.1, key="in_body_gou")
+
+    st.sidebar.markdown("---")
+    st.sidebar.write("**【第5階層】(1) 等の設定**")
+    indent_lv5 = st.sidebar.slider("第5階層 の字下げ", min_value=0.0, max_value=15.0, step=0.1, key="i5")
+    hanging_lv5 = st.sidebar.slider("第5階層 の突き出し幅", min_value=0.0, max_value=5.0, step=0.1, key="h5")
+    add_space_lv5 = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_lv5")
+    indent_body_lv5 = st.sidebar.slider("第5階層 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.1, key="in_body_lv5")
+
+    st.sidebar.markdown("---")
+    st.sidebar.write("**【第6階層】(ア) 等の設定**")
+    indent_lv6 = st.sidebar.slider("第6階層 の字下げ", min_value=0.0, max_value=15.0, step=0.1, key="i6")
+    hanging_lv6 = st.sidebar.slider("第6階層 の突き出し幅", min_value=0.0, max_value=5.0, step=0.1, key="h6")
+    add_space_lv6 = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_lv6")
+    indent_body_lv6 = st.sidebar.slider("第6階層 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.1, key="in_body_lv6")
+
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("⚙️ 特殊な記号を追加（上級者向け）"):
+        st.write("自社の規定で特殊な記号を使っている場合のみ入力。（複数ある場合はカンマ区切り）")
+        custom_kou = st.text_input("第3階層（項）に追加", placeholder="例: ◆, ●", key="c_kou")
+        custom_gou = st.text_input("第4階層（号）に追加", placeholder="例: ・", key="c_gou")
+        custom_lv5 = st.text_input("第5階層に追加", placeholder="例: a.", key="c_lv5")
+        custom_lv6 = st.text_input("第6階層に追加", placeholder="例: (a)", key="c_lv6")
 
     st.sidebar.markdown("---")
     st.sidebar.write("**表（ツリー図）の配置設定**")
@@ -370,7 +571,7 @@ def main():
 
     calculated_art_indent = 0.0
     if art_indent_type == "本文（番号なし）の開始位置に合わせる":
-        calculated_art_indent = indent_normal
+        calculated_art_indent = indent_body_jou
     elif art_indent_type == "項（１．等）の番号位置に合わせる":
         calculated_art_indent = indent_kou
     elif art_indent_type == "号（① 等）の番号位置に合わせる":
@@ -392,6 +593,8 @@ def main():
             block_buffer = []
             in_code_block = False
             in_csv_table = False
+            is_first_text_line = True 
+            last_p = "none"
             
             for line in text_input.split('\n'):
                 raw_line = line.rstrip('\r\n')
@@ -450,21 +653,63 @@ def main():
                 
                 line_strip = convert_char_width(line_strip, width_mode)
                 
-                if line_strip in ["就　業　規　則", "就業規則", "賃　金　規　程", "賃金規程", "育児・介護休業規程", "退職金規程"]:
-                    preview_html += f"<div style='text-align: center; font-weight: bold; margin-top: 15px; font-size: 1.2em;'>{line_strip}</div>"
-                elif re.match(r'^第.*章', line_strip):
-                    preview_html += f"<div style='text-align: center; font-weight: bold; margin-top: 15px;'>{line_strip}</div>"
-                elif re.match(r'^第.*条', line_strip):
-                    preview_html += f"<div style='font-weight: bold; margin-top: 10px;'>{line_strip}</div>"
-                elif re.match(r'^([０-９0-9]+[．\.]|\([０-９0-9]+\))', line_strip):
-                    preview_html += f"<div style='margin-left: {indent_kou}em; padding-left: {hanging_kou}em; text-indent: -{hanging_kou}em;'>{line_strip}</div>"
-                elif re.match(r'^[①-⑳]', line_strip):
-                    preview_html += f"<div style='margin-left: {indent_gou}em; padding-left: {hanging_gou}em; text-indent: -{hanging_gou}em;'>{line_strip}</div>"
+                m_sh = get_hierarchy_match(line_strip, RE_SHOU, None, width_mode)
+                m_jo = get_hierarchy_match(line_strip, RE_JOU, None, width_mode)
+                m_ko = get_hierarchy_match(line_strip, RE_KOU, custom_kou, width_mode)
+                m_go = get_hierarchy_match(line_strip, RE_GOU, custom_gou, width_mode)
+                m_l5 = get_hierarchy_match(line_strip, RE_LV5, custom_lv5, width_mode)
+                m_l6 = get_hierarchy_match(line_strip, RE_LV6, custom_lv6, width_mode)
+
+                is_title = False
+                if is_first_text_line:
+                    if not m_sh and not m_jo:
+                        is_title = True
+                    is_first_text_line = False
+                elif line_strip in ["就　業　規　則", "就業規則", "賃　金　規　程", "賃金規程", "育児・介護休業規程", "退職金規程"]:
+                    is_title = True
+
+                if is_title:
+                    preview_html += f"<div style='text-align: center; font-weight: bold; margin-bottom: 24px; font-size: 1.3em;'>{line_strip}</div>"
+                    last_p = "title"
+                elif m_sh:
+                    preview_html += f"<div style='text-align: center; font-weight: bold; margin-top: 15px;'>{line_strip}</div>"; last_p = "shou"
+                elif m_jo:
+                    preview_html += f"<div style='font-weight: bold; border-left: 4px solid #333; padding-left: 10px; margin-top: 10px;'>{line_strip}</div>"; last_p = "jou"
+                elif m_ko:
+                    preview_html += f"<div style='margin-left: {indent_kou}em; padding-left: {hanging_kou}em; text-indent: -{hanging_kou}em; color: red;'>{line_strip}</div>"; last_p = "kou"
+                elif m_go:
+                    preview_html += f"<div style='margin-left: {indent_gou}em; padding-left: {hanging_gou}em; text-indent: -{hanging_gou}em; color: red;'>{line_strip}</div>"; last_p = "gou"
+                elif m_l5:
+                    preview_html += f"<div style='margin-left: {indent_lv5}em; padding-left: {hanging_lv5}em; text-indent: -{hanging_lv5}em; color: red;'>{line_strip}</div>"; last_p = "lv5"
+                elif m_l6:
+                    preview_html += f"<div style='margin-left: {indent_lv6}em; padding-left: {hanging_lv6}em; text-indent: -{hanging_lv6}em; color: red;'>{line_strip}</div>"; last_p = "lv6"
                 else:
+                    add_space = False
+                    if last_p in ["shou", "title", "none"]:
+                        ind = indent_body_shou
+                        add_space = add_space_shou
+                    elif last_p == "jou":
+                        ind = indent_body_jou
+                        add_space = add_space_jou
+                    elif last_p == "kou":
+                        ind = indent_body_kou
+                        add_space = add_space_kou
+                    elif last_p == "gou":
+                        ind = indent_body_gou
+                        add_space = add_space_gou
+                    elif last_p == "lv5":
+                        ind = indent_body_lv5
+                        add_space = add_space_lv5
+                    elif last_p == "lv6":
+                        ind = indent_body_lv6
+                        add_space = add_space_lv6
+                    
                     output_text = line_strip
-                    if add_body_space and output_text:
+                    if add_space and output_text:
                         output_text = '　' + output_text
-                    preview_html += f"<div style='margin-left: {indent_normal}em;'>{output_text}</div>"
+                    
+                    base_off = "14px" if last_p == "jou" else "0px"
+                    preview_html += f"<div style='margin-left: calc({ind}em + {base_off}); color:#555;'>{output_text}</div>"
             
             if block_buffer:
                 if is_csv_block(block_buffer): preview_html += get_html_table(block_buffer, width_mode)
@@ -479,12 +724,12 @@ def main():
 
     if text_input:
         st.markdown("---")
-        doc = create_word_doc(text_input, selected_font, width_mode, add_body_space, indent_normal, calculated_art_indent, indent_kou, hanging_kou, indent_gou, hanging_gou)
+        doc = create_word_doc(text_input, selected_font, width_mode, add_space_shou, add_space_jou, add_space_kou, add_space_gou, add_space_lv5, add_space_lv6, indent_body_shou, indent_body_jou, indent_body_kou, indent_body_gou, indent_body_lv5, indent_body_lv6, calculated_art_indent, indent_kou, hanging_kou, indent_gou, hanging_gou, indent_lv5, hanging_lv5, indent_lv6, hanging_lv6, custom_kou, custom_gou, custom_lv5, custom_lv6, out_mode)
         bio = io.BytesIO()
         doc.save(bio)
         
         st.download_button(
-            label="📥 設定を反映してWordファイルをダウンロード",
+            label=f"📥 {out_mode}設定を反映してWordファイルをダウンロード",
             data=bio.getvalue(),
             file_name="整形済み就業規則.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -492,4 +737,9 @@ def main():
         )
 
 if __name__ == "__main__":
-    main()
+    import sys
+    import subprocess
+    if "streamlit" not in sys.argv[0]:
+        subprocess.run([sys.executable, "-m", "streamlit", "run", sys.argv[0]])
+    else:
+        main()
