@@ -399,7 +399,7 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
         elif m_gou:
             p = doc.add_paragraph(line_strip)
             if "アウトライン" in out_mode: set_outline_level(p, 4)
-            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=indent_gou, hanging_ind=hanging_kou)
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=indent_gou, hanging_ind=hanging_gou)
             last_ctx = "gou"
 
         elif m_lv5:
