@@ -9,7 +9,7 @@ import re
 import pandas as pd
 
 # ==========================================================
-# --- 全角/半角 変換用テーブル（英数字＋すべての記号を網羅） ---
+# --- 全角/半角 変換用テーブル ---
 # ==========================================================
 HALF_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~¥"
 FULL_CHARS = "０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ！＂＃＄％＆’（）＊＋，－．／：；＜＝＞？＠［＼］＾＿｀｛｜｝～￥"
@@ -20,14 +20,14 @@ FULL2HALF = str.maketrans(FULL_CHARS, HALF_CHARS)
 BORDER_CHARS = ['┌', '└', '│', '─', '├', '┤', '┬', '┴', '┼', '━', '┃', '┏', '┓', '┗', '┛', '┣', '┫', '┳', '┻', '╋', '┠', '┨', '┯', '┷', '┿', '┝', '┥', '┰', '┸', '╂']
 
 # --- 階層ごとの正規表現パターン ---
-RE_SHOU = r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+章'
-RE_JOU  = r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+条'
+RE_SHOU = r'^第[ \t　]*[0-9１２３４５６７８９０一二三四五六七八九十百]+[ \t　]*章'
+RE_JOU  = r'^第[ \t　]*[0-9１２３４５６７８９０一二三四五六七八九十百]+[ \t　]*条'
 RE_KOU  = r'^[０-９0-9]+[．\.]'
 RE_GOU  = r'^[①-⑳㉑-㉟㊱-㊿]'
 RE_LV5  = r'^[（\(][０-９0-9]+[）\)]'
 RE_LV6  = r'^[（\(][ア-ンァ-ォ]+[）\)]'
 
-TITLE_LIST = ["就　業　規　則", "就業規則", "賃　金　規　程", "賃金規程", "育児・介護休業規程", "退職金規程", "付　則", "付則"]
+TITLE_LIST = ["就　業　規　規則", "就業規則", "賃　金　規　程", "賃金規程", "育児・介護休業規程", "退職金規程", "付　則", "付則"]
 
 def convert_char_width(text, mode):
     if mode == "半角に統一":
@@ -54,6 +54,48 @@ def strip_marker(text, marker_str):
         return text[len(marker_str):].lstrip()
     return text
 
+def normalize_marker_space(line, marker):
+    if not marker: return line
+    body = line[len(marker):].lstrip(" \t　")
+    if body:
+        return f"{marker}{body}"
+    return marker
+
+def renumber_headings(text):
+    chapter_count = 0
+    article_count = 0
+    new_lines = []
+    change_log = []
+    
+    pat_chapter = re.compile(r'^([ \t　]*)第[ \t　]*[0-9１２３４５６７８９０一二三四五六七八九十百]+[ \t　]*章(.*)')
+    pat_article = re.compile(r'^([ \t　]*)第[ \t　]*[0-9１２３４５６７８９０一二三四五六七八九十百]+[ \t　]*条(の[0-9１２３４５６７８９０一二三四五六七八九十百]+)?(.*)')
+
+    for line in text.split('\n'):
+        original_line = line
+        m_chap = pat_chapter.match(line)
+        m_art = pat_article.match(line)
+        
+        if m_chap:
+            chapter_count += 1
+            new_line = f"{m_chap.group(1)}第{chapter_count}章{m_chap.group(2)}"
+            if original_line.strip() != new_line.strip():
+                change_log.append({"階層": "章", "変更前 (旧)": original_line.strip(), "変更後 (新)": new_line.strip()})
+            line = new_line
+            
+        elif m_art:
+            if not m_art.group(2):
+                article_count += 1
+            branch = m_art.group(2) if m_art.group(2) else ""
+            new_line = f"{m_art.group(1)}第{article_count}条{branch}{m_art.group(3)}"
+            
+            if original_line.strip() != new_line.strip():
+                change_log.append({"階層": "条", "変更前 (旧)": original_line.strip(), "変更後 (新)": new_line.strip()})
+            line = new_line
+        
+        new_lines.append(line)
+        
+    return '\n'.join(new_lines), change_log
+
 def set_font(run, font_name, size_pt=None, bold=False):
     run.font.name = font_name
     run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
@@ -73,18 +115,23 @@ def add_toc(doc):
     p = doc.add_paragraph()
     p.paragraph_format.snap_to_grid = False
     run = p.add_run()
-    fldChar = OxmlElement('w:fldChar')
-    fldChar.set(qn('w:fldCharType'), 'begin')
-    run._element.append(fldChar)
+    
+    fldChar1 = OxmlElement('w:fldChar')
+    fldChar1.set(qn('w:fldCharType'), 'begin')
+    run._element.append(fldChar1)
     
     instrText = OxmlElement('w:instrText')
     instrText.set(qn('xml:space'), 'preserve')
-    instrText.text = 'TOC \\o "1-3" \\h \\z \\u'
+    instrText.text = 'TOC \\o "1-2" \\h \\z \\u'
     run._element.append(instrText)
     
-    fldChar = OxmlElement('w:fldChar')
-    fldChar.set(qn('w:fldCharType'), 'end')
-    run._element.append(fldChar)
+    fldChar2 = OxmlElement('w:fldChar')
+    fldChar2.set(qn('w:fldCharType'), 'separate')
+    run._element.append(fldChar2)
+    
+    fldChar3 = OxmlElement('w:fldChar')
+    fldChar3.set(qn('w:fldCharType'), 'end')
+    run._element.append(fldChar3)
     doc.add_page_break()
 
 def set_update_fields(doc):
@@ -96,12 +143,22 @@ def set_update_fields(doc):
     except Exception:
         pass
 
+# ★ ここが究極の修正ポイント：ファイル破損を防ぎつつ、スタイルを使わずに階層レベルだけを直接設定
 def set_outline_level(p, level):
     pPr = p._element.get_or_add_pPr()
     outlineLvl = pPr.find(qn('w:outlineLvl'))
     if outlineLvl is None:
         outlineLvl = OxmlElement('w:outlineLvl')
-        pPr.append(outlineLvl)
+        # OOXMLの厳密なタグ順序ルールを守るため、特定のタグの「手前」に安全に挿入する
+        inserted = False
+        for tag in ['w:divId', 'w:cnfStyle', 'w:rPr', 'w:sectPr', 'w:pPrChange']:
+            child = pPr.find(qn(tag))
+            if child is not None:
+                child.addprevious(outlineLvl)
+                inserted = True
+                break
+        if not inserted:
+            pPr.append(outlineLvl)
     outlineLvl.set(qn('w:val'), str(level - 1))
 
 def is_csv_block(lines):
@@ -112,7 +169,10 @@ def is_csv_block(lines):
 
 def apply_format_sync(p, font_name, size_pt=10.5, bold=False, base_ind=0.0, hanging_ind=0.0, align_center=False):
     pf = p.paragraph_format
-    pf.snap_to_grid = False
+    pf.snap_to_grid = False 
+    pf.space_before = Pt(0) 
+    pf.space_after = Pt(0)  
+    pf.line_spacing_rule = WD_LINE_SPACING.SINGLE 
     
     total_left = base_ind + hanging_ind
     pf.left_indent = Pt(10.5 * total_left)
@@ -121,9 +181,6 @@ def apply_format_sync(p, font_name, size_pt=10.5, bold=False, base_ind=0.0, hang
         pf.first_line_indent = Pt(-10.5 * hanging_ind)
     else:
         pf.first_line_indent = Pt(0)
-    
-    pf.space_after = Pt(0)
-    pf.line_spacing_rule = WD_LINE_SPACING.SINGLE
     
     if align_center:
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -136,7 +193,11 @@ def apply_format_sync(p, font_name, size_pt=10.5, bold=False, base_ind=0.0, hang
         set_font(run, font_name, size_pt, bold)
 
 def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_jou, add_space_kou, add_space_gou, add_space_lv5, add_space_lv6, indent_body_shou, indent_body_jou, indent_body_kou, indent_body_gou, indent_body_lv5, indent_body_lv6, art_indent_val, indent_kou, hanging_kou, indent_gou, hanging_gou, indent_lv5, hanging_lv5, indent_lv6, hanging_lv6, custom_kou, custom_gou, custom_lv5, custom_lv6, out_mode):
-    doc = docx.Document('template.docx')
+    try:
+        doc = docx.Document('template.docx')
+    except Exception:
+        doc = docx.Document()
+        
     if "アウトライン" in out_mode:
         set_update_fields(doc)
     
@@ -235,7 +296,7 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
         raw_line = re.sub(r'\[\d+\][ \t]?', '', raw_line)
         line_strip = raw_line.strip()
         
-        is_heading = bool(re.match(r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+[章条]', line_strip)) or line_strip in TITLE_LIST
+        is_heading = bool(re.match(RE_SHOU, line_strip) or re.match(RE_JOU, line_strip)) or line_strip in TITLE_LIST
         
         if '```' in line_strip or '｀｀｀' in line_strip:
             if in_code_block:
@@ -290,6 +351,11 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
         m_lv5 = get_hierarchy_match(line_strip, RE_LV5, custom_lv5, width_mode)
         m_lv6 = get_hierarchy_match(line_strip, RE_LV6, custom_lv6, width_mode)
 
+        if m_kou: line_strip = normalize_marker_space(line_strip, m_kou)
+        elif m_gou: line_strip = normalize_marker_space(line_strip, m_gou)
+        elif m_lv5: line_strip = normalize_marker_space(line_strip, m_lv5)
+        elif m_lv6: line_strip = normalize_marker_space(line_strip, m_lv6)
+
         is_title = False
         if is_first_text_line:
             if not m_shou and not m_jou:
@@ -298,7 +364,7 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
         elif line_strip in TITLE_LIST:
             is_title = True
 
-        if (is_title or m_shou or m_jou) and not toc_added:
+        if (m_shou or m_jou) and not toc_added:
             add_toc(doc)
             toc_added = True
 
@@ -309,19 +375,19 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
             p.paragraph_format.space_after = Pt(24)
             last_ctx = "shou"
 
+        # ★ ここから下の段落処理で、見出しスタイル（doc.styles['Heading X']）を完全に撤廃しました！
         elif m_shou:
             p = doc.add_paragraph(line_strip)
             if "アウトライン" in out_mode: set_outline_level(p, 1)
             apply_format_sync(p, selected_font, size_pt=13, bold=True, align_center=True)
-            p.paragraph_format.space_before = Pt(18)
-            p.paragraph_format.space_after = Pt(12)
+            p.paragraph_format.space_before = Pt(12) 
             last_ctx = "shou"
             
         elif m_jou:
             p = doc.add_paragraph(line_strip)
             if "アウトライン" in out_mode: set_outline_level(p, 2)
             apply_format_sync(p, selected_font, size_pt=10.5, bold=True, base_ind=0.0)
-            p.paragraph_format.space_before = Pt(6)
+            p.paragraph_format.space_before = Pt(6) 
             last_ctx = "jou"
         
         elif m_kou:
@@ -333,7 +399,7 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
         elif m_gou:
             p = doc.add_paragraph(line_strip)
             if "アウトライン" in out_mode: set_outline_level(p, 4)
-            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=indent_gou, hanging_ind=hanging_gou)
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=False, base_ind=indent_gou, hanging_ind=hanging_kou)
             last_ctx = "gou"
 
         elif m_lv5:
@@ -412,13 +478,14 @@ def get_html_art(art_lines, indent_art, width_mode):
 def reset_settings():
     st.session_state.font_choice = "MS 明朝"
     st.session_state.width_mode_choice = "全角に統一（推奨）"
+    st.session_state.out_mode = "【推奨】アウトライン連動"
     
-    st.session_state.add_space_shou = False
-    st.session_state.add_space_jou = False
-    st.session_state.add_space_kou = False
-    st.session_state.add_space_gou = False
-    st.session_state.add_space_lv5 = False
-    st.session_state.add_space_lv6 = False
+    st.session_state.as_shou = False
+    st.session_state.as_jou = False
+    st.session_state.as_kou = False
+    st.session_state.as_gou = False
+    st.session_state.as_l5 = False
+    st.session_state.as_l6 = False
     
     st.session_state.in_body_shou = 0.0
     st.session_state.in_body_jou = 1.0
@@ -441,6 +508,7 @@ def reset_settings():
     st.session_state.c_gou = ""
     st.session_state.c_lv5 = ""
     st.session_state.c_lv6 = ""
+    st.session_state.auto_renumber = False
 
 def main():
     st.set_page_config(page_title="就業規則 Word変換", layout="wide")
@@ -450,76 +518,85 @@ def main():
         reset_settings()
         st.session_state.initialized = True
 
-    st.sidebar.header("🚀 出力エンジン・書式設定")
-    out_mode = st.sidebar.radio("モード選択", ["【推奨】アウトライン連動", "直接モード"])
-    if "アウトライン" in out_mode:
-        df_outline = pd.DataFrame({"Lv": ["1", "2", "3", "4", "5", "6"], "役割": ["章", "条", "項", "号", "(1)", "(ア)"], "内部処理": ["アウトラインLv1", "アウトラインLv2", "アウトラインLv3", "アウトラインLv4", "アウトラインLv5", "アウトラインLv6"]})
-        st.sidebar.table(df_outline)
+    st.sidebar.button("🔄 推奨設定（初期値）に戻す（上）", on_click=reset_settings, key="reset_top", use_container_width=True)
 
-    st.sidebar.button("🔄 推奨設定（初期値）に戻す", on_click=reset_settings, use_container_width=True)
-    st.sidebar.markdown("---")
+    with st.sidebar.form(key='settings_form'):
+        submit_button_top = st.form_submit_button(label='🔄 設定を適用してプレビュー更新（上）', type='primary', use_container_width=True)
 
-    selected_font = st.sidebar.selectbox("基本フォント", options=["MS 明朝", "MS ゴシック", "Meiryo", "Yu Mincho", "Yu Gothic", "Arial"], key="font_choice")
-    width_mode = st.sidebar.radio("英数字の表記統一", options=["全角に統一（推奨）", "半角に統一", "変換しない（元のまま）"], key="width_mode_choice")
-    
-    st.sidebar.markdown("---")
-    st.sidebar.write("**【第1階層】章（表題）の設定**")
-    add_space_shou = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_shou")
-    indent_body_shou = st.sidebar.slider("章 直後の本文 字下げ", min_value=0.0, max_value=10.0, step=0.5, key="in_body_shou")
-    
-    st.sidebar.markdown("---")
-    st.sidebar.write("**【第2階層】条の設定**")
-    add_space_jou = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_jou")
-    indent_body_jou = st.sidebar.slider("条 直後の本文 字下げ", min_value=0.0, max_value=10.0, step=0.5, key="in_body_jou")
+        st.header("🚀 出力エンジン・書式設定")
+        out_mode = st.radio("モード選択", ["【推奨】アウトライン連動", "直接モード"], key="out_mode")
+        if "アウトライン" in out_mode:
+            df_outline = pd.DataFrame({"Lv": ["1", "2", "3", "4", "5", "6"], "役割": ["章", "条", "項", "号", "(1)", "(ア)"], "内部処理": ["アウトラインLv1", "アウトラインLv2", "アウトラインLv3", "アウトラインLv4", "アウトラインLv5", "アウトラインLv6"]})
+            st.table(df_outline)
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("**【第3階層】項（1. 等）の設定**")
-    indent_kou = st.sidebar.slider("項 の字下げ", min_value=0.0, max_value=15.0, step=0.5, key="ik")
-    hanging_kou = st.sidebar.slider("項 の突き出し幅", min_value=0.0, max_value=5.0, step=0.5, key="hk")
-    add_space_kou = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_kou")
-    indent_body_kou = st.sidebar.slider("項 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.5, key="in_body_kou")
+        st.markdown("---")
+        st.write("**🔢 自動採番オプション**")
+        auto_renumber = st.checkbox("章・条の番号を自動で振り直す（1から連番）", key="auto_renumber")
+        if auto_renumber:
+            st.warning("⚠️ 見出しの番号のみ更新されます。本文中の参照部分は手動で修正してください。")
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("**【第4階層】号（① 等）の設定**")
-    indent_gou = st.sidebar.slider("号 の字下げ", min_value=0.0, max_value=15.0, step=0.5, key="ig")
-    hanging_gou = st.sidebar.slider("号 の突き出し幅", min_value=0.0, max_value=5.0, step=0.5, key="hg")
-    add_space_gou = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_gou")
-    indent_body_gou = st.sidebar.slider("号 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.5, key="in_body_gou")
+        st.markdown("---")
+        selected_font = st.selectbox("基本フォント", options=["MS 明朝", "MS ゴシック", "Meiryo", "Yu Mincho", "Yu Gothic", "Arial"], key="font_choice")
+        width_mode = st.radio("英数字の表記統一", options=["全角に統一（推奨）", "半角に統一", "変換しない（元のまま）"], key="width_mode_choice")
+        
+        st.markdown("---")
+        st.write("**【第1階層】章（表題）の設定**")
+        add_space_shou = st.checkbox("本文の先頭に全角スペースを自動挿入", key='as_shou')
+        indent_body_shou = st.slider("章 直後の本文 字下げ", min_value=0.0, max_value=10.0, step=0.5, key="in_body_shou")
+        
+        st.markdown("---")
+        st.write("**【第2階層】条の設定**")
+        add_space_jou = st.checkbox("本文の先頭に全角スペースを自動挿入", key='as_jou')
+        indent_body_jou = st.slider("条 直後の本文 字下げ", min_value=0.0, max_value=10.0, step=0.5, key="in_body_jou")
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("**【第5階層】(1) 等の設定**")
-    indent_lv5 = st.sidebar.slider("第5階層 の字下げ", min_value=0.0, max_value=15.0, step=0.5, key="i5")
-    hanging_lv5 = st.sidebar.slider("第5階層 の突き出し幅", min_value=0.0, max_value=5.0, step=0.5, key="h5")
-    add_space_lv5 = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_lv5")
-    indent_body_lv5 = st.sidebar.slider("第5階層 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.5, key="in_body_lv5")
+        st.markdown("---")
+        st.write("**【第3階層】項（1. 等）の設定**")
+        indent_kou = st.slider("項 の字下げ", min_value=0.0, max_value=15.0, step=0.5, key="ik")
+        hanging_kou = st.slider("項 の突き出し幅", min_value=0.0, max_value=5.0, step=0.5, key="hk")
+        add_space_kou = st.checkbox("本文の先頭に全角スペースを自動挿入", key='as_kou')
+        indent_body_kou = st.slider("項 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.5, key="in_body_kou")
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("**【第6階層】(ア) 等の設定**")
-    indent_lv6 = st.sidebar.slider("第6階層 の字下げ", min_value=0.0, max_value=15.0, step=0.5, key="i6")
-    hanging_lv6 = st.sidebar.slider("第6階層 の突き出し幅", min_value=0.0, max_value=5.0, step=0.5, key="h6")
-    add_space_lv6 = st.sidebar.checkbox("本文の先頭に全角スペースを自動挿入", key="add_space_lv6")
-    indent_body_lv6 = st.sidebar.slider("第6階層 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.5, key="in_body_lv6")
+        st.markdown("---")
+        st.write("**【第4階層】号（① 等）の設定**")
+        indent_gou = st.slider("号 の字下げ", min_value=0.0, max_value=15.0, step=0.5, key="ig")
+        hanging_gou = st.slider("号 の突き出し幅", min_value=0.0, max_value=5.0, step=0.5, key="hg")
+        add_space_gou = st.checkbox("本文の先頭に全角スペースを自動挿入", key='as_gou')
+        indent_body_gou = st.slider("号 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.5, key="in_body_gou")
 
-    st.sidebar.markdown("---")
-    with st.sidebar.expander("⚙️ 特殊な記号を追加（上級者向け）"):
-        st.write("自社の規定で特殊な記号を使っている場合のみ入力。（複数ある場合はカンマ区切り）")
-        custom_kou = st.text_input("第3階層（項）に追加", placeholder="例: ◆, ●", key="c_kou")
-        custom_gou = st.text_input("第4階層（号）に追加", placeholder="例: ・", key="c_gou")
-        custom_lv5 = st.text_input("第5階層に追加", placeholder="例: a.", key="c_lv5")
-        custom_lv6 = st.text_input("第6階層に追加", placeholder="例: (a)", key="c_lv6")
+        st.markdown("---")
+        st.write("**【第5階層】(1) 等の設定**")
+        indent_lv5 = st.slider("第5階層 の字下げ", min_value=0.0, max_value=15.0, step=0.5, key="i5")
+        hanging_lv5 = st.slider("第5階層 の突き出し幅", min_value=0.0, max_value=5.0, step=0.5, key="h5")
+        add_space_lv5 = st.checkbox("本文の先頭に全角スペースを自動挿入", key='as_l5')
+        indent_body_lv5 = st.slider("第5階層 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.5, key="in_body_lv5")
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("**表（ツリー図）の配置設定**")
-    art_indent_type = st.sidebar.radio(
-        "表の左端をどこに合わせますか？",
-        options=[
-            "左端（0字下げ）に合わせる", 
-            "本文（番号なし）の開始位置に合わせる", 
-            "項（１．等）の番号位置に合わせる", 
-            "号（① 等）の番号位置に合わせる"
-        ],
-        key="art_type"
-    )
+        st.markdown("---")
+        st.write("**【第6階層】(ア) 等の設定**")
+        indent_lv6 = st.slider("第6階層 の字下げ", min_value=0.0, max_value=15.0, step=0.5, key="i6")
+        hanging_lv6 = st.slider("第6階層 の突き出し幅", min_value=0.0, max_value=5.0, step=0.5, key="h6")
+        add_space_lv6 = st.checkbox("本文の先頭に全角スペースを自動挿入", key='as_l6')
+        indent_body_lv6 = st.slider("第6階層 直後の本文 字下げ", min_value=0.0, max_value=15.0, step=0.5, key="in_body_lv6")
+
+        st.markdown("---")
+        with st.expander("⚙️ 特殊な記号を追加（上級者向け）"):
+            st.write("自社の規定で特殊な記号を使っている場合のみ入力。（複数ある場合はカンマ区切り）")
+            custom_kou = st.text_input("第3階層（項）に追加", placeholder="例: ◆, ●", key="c_kou")
+            custom_gou = st.text_input("第4階層（号）に追加", placeholder="例: ・", key="c_gou")
+            custom_lv5 = st.text_input("第5階層に追加", placeholder="例: a.", key="c_lv5")
+            custom_lv6 = st.text_input("第6階層に追加", placeholder="例: (a)", key="c_lv6")
+
+        st.markdown("---")
+        st.write("**表（ツリー図）の配置設定**")
+        art_indent_type = st.radio(
+            "表の左端をどこに合わせますか？",
+            options=["左端（0字下げ）に合わせる", "本文（番号なし）の開始位置に合わせる", "項（１．等）の番号位置に合わせる", "号（① 等）の番号位置に合わせる"],
+            key="art_type"
+        )
+        
+        st.markdown("---")
+        submit_button_bottom = st.form_submit_button(label='🔄 設定を適用してプレビュー更新（下）', type='primary', use_container_width=True)
+
+    st.sidebar.button("🔄 推奨設定（初期値）に戻す（下）", on_click=reset_settings, key="reset_bottom", use_container_width=True)
 
     calculated_art_indent = 0.0
     if art_indent_type == "本文（番号なし）の開始位置に合わせる":
@@ -532,13 +609,23 @@ def main():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.write("▼ ここにテキストを貼り付け")
+        st.write("▼ ここにテキストを貼り付け（貼り付け後、左の「設定を適用」ボタンを押してください）")
         text_input = st.text_area("就業規則テキスト", height=600, label_visibility="collapsed")
     
     with col2:
         st.write("▼ インデント簡易プレビュー（全行表示）")
-        if text_input:
-            preview_html = f"<div style='font-family: \"{selected_font}\", sans-serif; font-size: 14px; line-height: 1.6; border: 1px solid #ddd; padding: 10px; height: 600px; overflow-y: auto;'>"
+        
+        processed_text = text_input
+        change_log = []
+        if auto_renumber and processed_text:
+            processed_text, change_log = renumber_headings(processed_text)
+            
+        if change_log:
+            st.success("🔄 条文番号を自動で振り直しました。本文中の参照番号（「第〇条の規定により～」など）を修正する際の参考にしてください。")
+            st.dataframe(pd.DataFrame(change_log), use_container_width=True)
+
+        if processed_text:
+            preview_html = f"<div style='font-family: \"{selected_font}\", sans-serif; font-size: 14px; line-height: 1.2; border: 1px solid #ddd; padding: 10px; height: 600px; overflow-y: auto;'>"
             
             art_buffer = []
             csv_buffer = []
@@ -548,13 +635,13 @@ def main():
             is_first_text_line = True 
             last_p = "none"
             
-            for line in text_input.split('\n'):
+            for line in processed_text.split('\n'):
                 raw_line = line.rstrip('\r\n')
                 raw_line = re.sub(r'\[ \t]?', '', raw_line)
                 raw_line = re.sub(r'\[\d+\][ \t]?', '', raw_line)
                 line_strip = raw_line.strip()
                 
-                is_heading = bool(re.match(r'^第[0-9１２３４５６７８９０一二三四五六七八九十百]+[章条]', line_strip)) or line_strip in TITLE_LIST
+                is_heading = bool(re.match(RE_SHOU, line_strip) or re.match(RE_JOU, line_strip)) or line_strip in TITLE_LIST
                 
                 if '```' in line_strip or '｀｀｀' in line_strip:
                     if in_code_block:
@@ -601,7 +688,7 @@ def main():
                     art_buffer.append(raw_line)
                     continue
                 else:
-                    if art_buffer: preview_html += get_html_art(art_buffer, calculated_art_indent, width_mode); art_buffer.clear()
+                    if art_buffer: flush_art(art_buffer)
                 
                 line_strip = convert_char_width(line_strip, width_mode)
                 
@@ -611,6 +698,11 @@ def main():
                 m_go = get_hierarchy_match(line_strip, RE_GOU, custom_gou, width_mode)
                 m_l5 = get_hierarchy_match(line_strip, RE_LV5, custom_lv5, width_mode)
                 m_l6 = get_hierarchy_match(line_strip, RE_LV6, custom_lv6, width_mode)
+
+                if m_ko: line_strip = normalize_marker_space(line_strip, m_ko)
+                elif m_go: line_strip = normalize_marker_space(line_strip, m_go)
+                elif m_l5: line_strip = normalize_marker_space(line_strip, m_l5)
+                elif m_l6: line_strip = normalize_marker_space(line_strip, m_l6)
 
                 is_title = False
                 if is_first_text_line:
@@ -624,11 +716,10 @@ def main():
                     preview_html += f"<div style='text-align: center; font-weight: bold; margin-bottom: 24px; font-size: 1.3em;'>{line_strip}</div>"
                     last_p = "title"
                 elif m_sh:
-                    preview_html += f"<div style='text-align: center; font-weight: bold; margin-top: 15px;'>{line_strip}</div>"; last_p = "shou"
+                    preview_html += f"<div style='text-align: center; font-weight: bold; margin-top: 5px;'>{line_strip}</div>"; last_p = "shou"
                 elif m_jo:
-                    preview_html += f"<div style='font-weight: bold; margin-top: 10px;'>{line_strip}</div>"; last_p = "jou"
+                    preview_html += f"<div style='font-weight: bold; margin-top: 5px;'>{line_strip}</div>"; last_p = "jou"
                 
-                # ▼ プレビュー画面の余分な余白（+14pxなど）を完全に削除 ▼
                 elif m_ko:
                     preview_html += f"<div style='margin-left: {indent_kou}em; padding-left: {hanging_kou}em; text-indent: -{hanging_kou}em; color: red;'>{line_strip}</div>"; last_p = "kou"
                 elif m_go:
@@ -663,7 +754,6 @@ def main():
                     if add_space and output_text:
                         output_text = '　' + output_text
                     
-                    # ▼ プレビュー側の謎のズレの原因となっていた「+14px」を削除！ ▼
                     preview_html += f"<div style='margin-left: {ind}em; color:#555;'>{output_text}</div>"
             
             if block_buffer:
@@ -679,7 +769,7 @@ def main():
 
     if text_input:
         st.markdown("---")
-        doc = create_word_doc(text_input, selected_font, width_mode, add_space_shou, add_space_jou, add_space_kou, add_space_gou, add_space_lv5, add_space_lv6, indent_body_shou, indent_body_jou, indent_body_kou, indent_body_gou, indent_body_lv5, indent_body_lv6, calculated_art_indent, indent_kou, hanging_kou, indent_gou, hanging_gou, indent_lv5, hanging_lv5, indent_lv6, hanging_lv6, custom_kou, custom_gou, custom_lv5, custom_lv6, out_mode)
+        doc = create_word_doc(processed_text, selected_font, width_mode, add_space_shou, add_space_jou, add_space_kou, add_space_gou, add_space_lv5, add_space_lv6, indent_body_shou, indent_body_jou, indent_body_kou, indent_body_gou, indent_body_lv5, indent_body_lv6, calculated_art_indent, indent_kou, hanging_kou, indent_gou, hanging_gou, indent_lv5, hanging_lv5, indent_lv6, hanging_lv6, custom_kou, custom_gou, custom_lv5, custom_lv6, out_mode)
         bio = io.BytesIO()
         doc.save(bio)
         
