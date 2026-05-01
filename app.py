@@ -22,10 +22,12 @@ BORDER_CHARS = ['┌', '└', '│', '─', '├', '┤', '┬', '┴', '┼', '
 # --- 階層ごとの正規表現パターン ---
 RE_SHOU = r'^第[ \t　]*[0-9１２３４５６７８９０一二三四五六七八九十百]+[ \t　]*章'
 RE_JOU  = r'^第[ \t　]*[0-9１２３４５６７８９０一二三四五六七八九十百]+[ \t　]*条'
-RE_KOU  = r'^[０-９0-9]+[．\.]'
+# 【修正箇所】数字＋ピリオド、または、数字＋スペース（全角・半角・タブ）の場合に項として判定
+RE_KOU  = r'^[０-９0-9]+(?:[．\.]|[ \t　]+)'
 RE_GOU  = r'^[①-⑳㉑-㉟㊱-㊿]'
 RE_LV5  = r'^[（\(][０-９0-9]+[）\)]'
 RE_LV6  = r'^[（\(][ア-ンァ-ォ]+[）\)]'
+RE_MIDASHI_GO = r'^[（\(].+[）\)]$' # カッコで囲まれた見出し語
 
 TITLE_LIST = ["就　業　規　規則", "就業規則", "賃　金　規　程", "賃金規程", "育児・介護休業規程", "退職金規程", "付　則", "付則"]
 
@@ -143,13 +145,11 @@ def set_update_fields(doc):
     except Exception:
         pass
 
-# ★ ここが究極の修正ポイント：ファイル破損を防ぎつつ、スタイルを使わずに階層レベルだけを直接設定
 def set_outline_level(p, level):
     pPr = p._element.get_or_add_pPr()
     outlineLvl = pPr.find(qn('w:outlineLvl'))
     if outlineLvl is None:
         outlineLvl = OxmlElement('w:outlineLvl')
-        # OOXMLの厳密なタグ順序ルールを守るため、特定のタグの「手前」に安全に挿入する
         inserted = False
         for tag in ['w:divId', 'w:cnfStyle', 'w:rPr', 'w:sectPr', 'w:pPrChange']:
             child = pPr.find(qn(tag))
@@ -290,7 +290,11 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
         else:
             flush_art(block_buffer)
 
-    for i, line in enumerate(text.split('\n')):
+    lines = text.split('\n')
+    num_lines = len(lines)
+
+    for i in range(num_lines):
+        line = lines[i]
         raw_line = line.rstrip('\r\n')
         raw_line = re.sub(r'\[ \t]?', '', raw_line)
         raw_line = re.sub(r'\[\d+\][ \t]?', '', raw_line)
@@ -342,6 +346,18 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
         else:
             if art_buffer: flush_art(art_buffer)
 
+        # カッコ見出しの先読み判定（空行スキップ対応）
+        line_strip_conv = convert_char_width(line_strip, width_mode)
+        is_midashi_go = bool(re.match(RE_MIDASHI_GO, line_strip_conv))
+        next_is_jou = False
+        if is_midashi_go:
+            for j in range(i + 1, num_lines):
+                nxt = lines[j].strip()
+                if not nxt: continue # 空行はスキップして次を見る
+                if re.match(RE_JOU, convert_char_width(nxt, width_mode)):
+                    next_is_jou = True
+                break
+
         line_strip = convert_char_width(line_strip, width_mode)
         
         m_shou = get_hierarchy_match(line_strip, RE_SHOU, None, width_mode)
@@ -375,7 +391,13 @@ def create_word_doc(text, selected_font, width_mode, add_space_shou, add_space_j
             p.paragraph_format.space_after = Pt(24)
             last_ctx = "shou"
 
-        # ★ ここから下の段落処理で、見出しスタイル（doc.styles['Heading X']）を完全に撤廃しました！
+        # 条文の上の見出し語の場合
+        elif is_midashi_go and next_is_jou:
+            p = doc.add_paragraph(line_strip)
+            apply_format_sync(p, selected_font, size_pt=10.5, bold=True, base_ind=0.0)
+            p.paragraph_format.space_before = Pt(12) 
+            last_ctx = "jou"
+
         elif m_shou:
             p = doc.add_paragraph(line_strip)
             if "アウトライン" in out_mode: set_outline_level(p, 1)
@@ -635,7 +657,11 @@ def main():
             is_first_text_line = True 
             last_p = "none"
             
-            for line in processed_text.split('\n'):
+            lines_preview = processed_text.split('\n')
+            num_lines_preview = len(lines_preview)
+
+            for i in range(num_lines_preview):
+                line = lines_preview[i]
                 raw_line = line.rstrip('\r\n')
                 raw_line = re.sub(r'\[ \t]?', '', raw_line)
                 raw_line = re.sub(r'\[\d+\][ \t]?', '', raw_line)
@@ -688,8 +714,22 @@ def main():
                     art_buffer.append(raw_line)
                     continue
                 else:
-                    if art_buffer: flush_art(art_buffer)
+                    if art_buffer: 
+                        preview_html += get_html_art(art_buffer, calculated_art_indent, width_mode)
+                        art_buffer.clear()
                 
+                # HTMLプレビュー側での見出し先読み
+                line_strip_conv = convert_char_width(line_strip, width_mode)
+                is_midashi_go = bool(re.match(RE_MIDASHI_GO, line_strip_conv))
+                next_is_jou = False
+                if is_midashi_go:
+                    for j in range(i + 1, num_lines_preview):
+                        nxt = lines_preview[j].strip()
+                        if not nxt: continue
+                        if re.match(RE_JOU, convert_char_width(nxt, width_mode)):
+                            next_is_jou = True
+                        break
+
                 line_strip = convert_char_width(line_strip, width_mode)
                 
                 m_sh = get_hierarchy_match(line_strip, RE_SHOU, None, width_mode)
@@ -715,6 +755,11 @@ def main():
                 if is_title:
                     preview_html += f"<div style='text-align: center; font-weight: bold; margin-bottom: 24px; font-size: 1.3em;'>{line_strip}</div>"
                     last_p = "title"
+
+                elif is_midashi_go and next_is_jou:
+                    preview_html += f"<div style='font-weight: bold; margin-top: 15px;'>{line_strip}</div>"
+                    last_p = "jou"
+
                 elif m_sh:
                     preview_html += f"<div style='text-align: center; font-weight: bold; margin-top: 5px;'>{line_strip}</div>"; last_p = "shou"
                 elif m_jo:
